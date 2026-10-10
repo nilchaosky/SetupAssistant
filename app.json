@@ -1,0 +1,55 @@
+[
+  {
+    "name": "脚本语言",
+    "items": [
+      {
+        "name": "Java",
+        "versions": [
+          {
+            "version": "8",
+            "url": ""
+          }
+        ]
+      },
+      {
+        "name": "Go",
+        "versions": [
+          {
+            "version": "",
+            "url": ""
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "数据库",
+    "items": [
+      {
+        "name": "mysql",
+        "versions": [
+          {
+            "version": "",
+            "url": ""
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "工具类",
+    "items": [
+      {
+        "name": "Notepad++",
+        "versions": [
+          {
+            "version": "v8.9.8",
+            "package": "npp.8.9.8.Installer.x64.exe",
+            "dir": "Editor/Notepad++",
+            "url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.8/npp.8.9.8.Installer.x64.exe"
+          }
+        ]
+      }
+    ]
+  }
+]
