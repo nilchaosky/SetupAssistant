@@ -1,10 +1,12 @@
+// Package terminal 从 app.json 读取软件清单，让用户勾选软件和版本。
+// 选完版本后选择盘符，拼上该软件自己的安装目录。主菜单用 F5 开始安装；安装列表为空时只提示。
+// 选中两个及以上 Java 版本时，开始安装前还要选择哪一个作为 JAVA_HOME。
 package terminal
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -19,7 +21,8 @@ const (
 	screenItems
 	screenVersions
 	screenSelected
-	screenDrives
+	screenDir
+	screenJavaHome
 )
 
 type appVersion struct {
@@ -39,33 +42,37 @@ type appCategory struct {
 	Items []appItem `json:"items"`
 }
 
+// PendingInstall 是一条待下载、待安装的软件，字段与 app.json 对应。
 type PendingInstall struct {
-	Name    string
-	Version string
-	Package string
-	Dir     string
-	URL     string
+	Name     string // 软件名
+	Version  string // 版本。latest 也会作为一行显示
+	Package  string // 安装包。下载文件名，或 resource/ 下的嵌入文件
+	Dir      string // 安装目录。盘符拼上 app.json 里的目录
+	URL      string // 下载地址。为空则跳过下载
+	JavaHome bool   // 为 true 时，这个版本安装成功后写成 JAVA_HOME
 }
 
-func SelectInstallTarget() ([]PendingInstall, string, error) {
-	picker, err := newPicker()
+// SelectInstallTarget 打开清单界面，返回已选软件。每条软件自带安装目录。
+// data 是 app.json 的内容。用户取消时返回 huh.ErrUserAborted。
+func SelectInstallTarget(data []byte) ([]PendingInstall, error) {
+	picker, err := newPicker(data)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	program := tea.NewProgram(picker, tea.WithAltScreen())
 	final, err := program.Run()
 	if err != nil {
 		if errors.Is(err, tea.ErrInterrupted) {
-			return nil, "", huh.ErrUserAborted
+			return nil, huh.ErrUserAborted
 		}
-		return nil, "", err
+		return nil, err
 	}
 
 	result := final.(pickerModel)
 	if result.aborted {
-		return nil, "", huh.ErrUserAborted
+		return nil, huh.ErrUserAborted
 	}
-	return append([]PendingInstall(nil), result.selected...), result.installDir, nil
+	return append([]PendingInstall(nil), result.selected...), nil
 }
 
 type pickerModel struct {
@@ -83,12 +90,13 @@ type pickerModel struct {
 	aborted       bool
 	done          bool
 	selected      []PendingInstall
+	draft         PendingInstall
 	drives        []windows.Drive
-	installDir    string
+	dirHint       string
 }
 
-func newPicker() (pickerModel, error) {
-	catalog, err := loadCatalog()
+func newPicker(data []byte) (pickerModel, error) {
+	catalog, err := loadCatalog(data)
 	if err != nil {
 		return pickerModel{}, err
 	}
@@ -100,26 +108,12 @@ func newPicker() (pickerModel, error) {
 	}, nil
 }
 
-func loadCatalog() ([]appCategory, error) {
-	data, err := readAppJSON()
-	if err != nil {
-		return nil, err
-	}
+func loadCatalog(data []byte) ([]appCategory, error) {
 	var catalog []appCategory
 	if err := json.Unmarshal(data, &catalog); err != nil {
 		return nil, fmt.Errorf("解析 app.json 失败: %w", err)
 	}
 	return catalog, nil
-}
-
-func readAppJSON() ([]byte, error) {
-	for _, path := range []string{"app.json", filepath.Join("..", "app.json")} {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return data, nil
-		}
-	}
-	return nil, errors.New("未找到 app.json")
 }
 
 func (m pickerModel) Init() tea.Cmd {
@@ -162,7 +156,10 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setStatus("", "安装列表为空")
 				return m, nil
 			}
-			m.openDrives()
+			m.startInstall()
+			if m.done {
+				return m, tea.Quit
+			}
 			return m, nil
 		case tea.KeyEnter:
 			m.confirm()
@@ -192,8 +189,10 @@ func (m pickerModel) View() string {
 		return m.optionView("选择"+item.Name+"版本", "版本", m.versionNames(), "↑↓ 移动    空格 勾选    回车 确认    tab 查看已选    esc 返回")
 	case screenSelected:
 		return m.selectedView()
-	case screenDrives:
-		return m.optionView("选择安装目录", "分区", m.driveNames(), "↑↓ 移动    空格 勾选    回车 确认    esc 返回")
+	case screenDir:
+		return m.dirView()
+	case screenJavaHome:
+		return m.optionView("选择 JAVA_HOME", "版本", m.javaHomeNames(), "↑↓ 移动    空格 勾选    回车 确认    esc 返回")
 	default:
 		return m.optionView("选择要安装的内容", "选项", m.categoryNames(), "↑↓ 移动    空格 勾选    回车 确认    tab 查看已选    F5 安装")
 	}
@@ -213,7 +212,7 @@ func (m pickerModel) selectedView() string {
 		lines = append(lines, mutedStyle.Render("  还没有选择安装模块"))
 	}
 	for i, item := range m.selected {
-		lines = append(lines, rowLine(i == m.cursor, true, item.label()))
+		lines = append(lines, rowLine(i == m.cursor, true, item.listLabel()))
 	}
 	return m.frame("已选择的安装模块", "模块", lines, "↑↓ 移动    空格 取消    tab 返回    esc 返回")
 }
@@ -257,19 +256,13 @@ func (m pickerModel) currentOptions() []string {
 		return m.versionNames()
 	case screenSelected:
 		return m.selectedLabels()
-	case screenDrives:
-		return m.driveNames()
+	case screenDir:
+		return m.dirOptions()
+	case screenJavaHome:
+		return m.javaHomeNames()
 	default:
 		return m.categoryNames()
 	}
-}
-
-func (m pickerModel) driveNames() []string {
-	names := make([]string, len(m.drives))
-	for i, drive := range m.drives {
-		names[i] = drive.Label()
-	}
-	return names
 }
 
 func (m pickerModel) categoryNames() []string {
@@ -292,7 +285,7 @@ func (m pickerModel) itemNames() []string {
 func (m pickerModel) selectedLabels() []string {
 	labels := make([]string, len(m.selected))
 	for i, item := range m.selected {
-		labels[i] = item.label()
+		labels[i] = item.listLabel()
 	}
 	return labels
 }
@@ -302,6 +295,13 @@ func (item PendingInstall) label() string {
 		return item.Name
 	}
 	return item.Name + " " + item.Version
+}
+
+func (item PendingInstall) listLabel() string {
+	if item.Dir == "" {
+		return item.label()
+	}
+	return item.label() + "  " + item.Dir
 }
 
 func (m pickerModel) versionChoices() []appVersion {
@@ -348,8 +348,10 @@ func (m *pickerModel) confirm() {
 		m.confirmItem()
 	case screenVersions:
 		m.confirmVersion()
-	case screenDrives:
-		m.confirmDrive()
+	case screenDir:
+		m.confirmDir()
+	case screenJavaHome:
+		m.confirmJavaHome()
 	}
 }
 
@@ -391,39 +393,127 @@ func (m *pickerModel) confirmVersion() {
 		return
 	}
 	chosen := versions[m.checked]
-	m.addSelected(PendingInstall{
+	m.draft = PendingInstall{
 		Name:    m.currentItem().Name,
 		Version: chosen.Version,
 		Package: chosen.Package,
-		Dir:     chosen.Dir,
 		URL:     chosen.URL,
-	})
-}
-
-func (m *pickerModel) openDrives() {
-	drives, err := windows.ListDrives()
-	m.drives = drives
-	m.screen = screenDrives
-	m.cursor = 0
-	m.checked = -1
+	}
+	if slashHint(chosen.Dir) == "" {
+		m.addSelected(m.draft)
+		return
+	}
+	drives, err := listFixedDrives()
 	if err != nil {
-		m.setStatus("", "读取分区失败")
+		m.setStatus("", "读取盘符失败")
 		return
 	}
 	if len(drives) == 0 {
-		m.setStatus("", "没有读到可用分区")
+		m.setStatus("", "没有可用盘符")
 		return
 	}
+	m.drives = drives
+	m.dirHint = chosen.Dir
+	m.screen = screenDir
+	m.cursor = 0
+	m.checked = -1
 	m.setStatus("", "")
 }
 
-func (m *pickerModel) confirmDrive() {
-	if m.checked < 0 || m.checked >= len(m.drives) {
+var listFixedDrives = windows.ListDrives
+
+func (m pickerModel) dirView() string {
+	return m.optionView("选择"+m.draft.label()+"安装目录", "目录", m.dirOptions(), "↑↓ 移动    空格 勾选    回车 确认    esc 返回")
+}
+
+func (m pickerModel) dirOptions() []string {
+	options := make([]string, len(m.drives))
+	for i, drive := range m.drives {
+		options[i] = joinDriveDir(drive.Path, m.dirHint)
+	}
+	return options
+}
+
+func slashHint(hint string) string {
+	hint = strings.Trim(strings.TrimSpace(hint), `\/`)
+	if hint == "" {
+		return ""
+	}
+	return filepath.FromSlash(hint)
+}
+
+// joinDriveDir 把盘符根路径和 app.json 里的目录拼成安装目录。
+func joinDriveDir(root, hint string) string {
+	hint = slashHint(hint)
+	if hint == "" {
+		return root
+	}
+	return filepath.Join(root, hint)
+}
+
+func (m *pickerModel) confirmDir() {
+	options := m.dirOptions()
+	if m.checked < 0 || m.checked >= len(options) {
 		m.setStatus("", "请选择安装目录")
 		return
 	}
-	m.installDir = m.drives[m.checked].Path
+	m.draft.Dir = options[m.checked]
+	m.addSelected(m.draft)
+}
+
+func (m *pickerModel) startInstall() {
+	if len(m.javaIndexes()) >= 2 {
+		m.screen = screenJavaHome
+		m.cursor = 0
+		m.checked = -1
+		m.setStatus("", "")
+		return
+	}
+	m.finishInstall()
+}
+
+func (m *pickerModel) confirmJavaHome() {
+	indexes := m.javaIndexes()
+	if m.checked < 0 || m.checked >= len(indexes) {
+		m.setStatus("", "请选择 JAVA_HOME")
+		return
+	}
+	for i := range m.selected {
+		m.selected[i].JavaHome = false
+	}
+	m.selected[indexes[m.checked]].JavaHome = true
 	m.done = true
+}
+
+// finishInstall 在只有一个 Java 时把它标成 JAVA_HOME，然后结束选择。
+func (m *pickerModel) finishInstall() {
+	indexes := m.javaIndexes()
+	for i := range m.selected {
+		m.selected[i].JavaHome = false
+	}
+	if len(indexes) == 1 {
+		m.selected[indexes[0]].JavaHome = true
+	}
+	m.done = true
+}
+
+func (m pickerModel) javaIndexes() []int {
+	indexes := make([]int, 0)
+	for i, item := range m.selected {
+		if item.Name == "Java" {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func (m pickerModel) javaHomeNames() []string {
+	indexes := m.javaIndexes()
+	names := make([]string, len(indexes))
+	for i, index := range indexes {
+		names[i] = m.selected[index].label()
+	}
+	return names
 }
 
 func (m *pickerModel) addSelected(item PendingInstall) {
@@ -472,8 +562,14 @@ func (m *pickerModel) back() {
 	switch m.screen {
 	case screenSelected:
 		m.screen = m.returnScreen
+	case screenDir:
+		m.screen = screenVersions
+		m.setStatus("", "")
 	case screenVersions:
 		m.screen = screenItems
+	case screenJavaHome:
+		m.screen = screenMenu
+		m.setStatus("", "")
 	default:
 		m.screen = screenMenu
 	}

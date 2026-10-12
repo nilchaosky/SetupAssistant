@@ -1,3 +1,4 @@
+// Package windows 负责提权、列出固定磁盘，以及用当前权限启动安装包。
 package windows
 
 import (
@@ -13,6 +14,8 @@ import (
 
 const seeMaskNoCloseProcess = 0x00000040
 
+// EnsureAdmin 保证当前进程以管理员身份运行。
+// 尚未提权时用 runas 重新启动自己并等待退出。用户拒绝 UAC 时直接结束。
 func EnsureAdmin() {
 	if elevated() {
 		return

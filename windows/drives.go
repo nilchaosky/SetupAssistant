@@ -6,9 +6,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Drive 是一块固定磁盘。
 type Drive struct {
-	Path string
-	Name string
+	Path string // 盘符根路径，例如 D:\
+	Name string // 卷标。没有则为空
 }
 
 func (d Drive) Label() string {
@@ -18,6 +19,7 @@ func (d Drive) Label() string {
 	return d.Path + "  " + d.Name
 }
 
+// ListDrives 返回本机固定磁盘，不包含光驱和可移动磁盘。
 func ListDrives() ([]Drive, error) {
 	mask, err := windows.GetLogicalDrives()
 	if err != nil {
